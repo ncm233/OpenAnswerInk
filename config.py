@@ -8,7 +8,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "api_base_url": "https://api.siliconflow.cn/v1",
     "api_key": os.environ.get("OPENAI_API_KEY", ""),  # 请在设置界面配置或通过环境变量传入
     "model_name": "deepseek-ai/DeepSeek-V4.1-Flash",
-    "vision_model_name": "Qwen/Qwen3-VL-8B-Instruct",   # 极速视觉提干大模型 (秒级高精 OCR / 公式)
+    "vision_model_name": "Qwen/Qwen3-VL-32B-Instruct",   # 极速视觉提干大模型 (秒级高精 OCR / 公式)
     "fine_vision_model_name": "Qwen/Qwen3-VL-32B-Instruct", # 行测图形推理专用 32B 深度视觉分析模型
     "use_two_stage_pipeline": True,  # 开启双模型黄金组合流水线 (视觉提干 + DeepSeek深度思考答题)
     "temperature": 0.3,

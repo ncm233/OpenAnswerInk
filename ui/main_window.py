@@ -3,6 +3,8 @@ import sys
 import time
 import html
 import ctypes
+import uuid
+import base64
 from typing import Optional, List
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -23,6 +25,7 @@ from core.ai_client import AIStreamWorker, VisionExtractorWorker
 from core.keyboard_typer import AutoTyperWorker
 from core.audio_capture import InterviewAudioListener
 from core.history_manager import history_manager
+from core.lan_bridge import lan_bridge_server
 from ui.selection_overlay import SelectionOverlay
 from ui.settings_dialog import SettingsDialog
 
@@ -202,9 +205,17 @@ class MainWindow(QMainWindow):
         self._interview_turn_count = 0
         self._is_first_interview_turn = True
         self._click_through_enabled = False
+        self._current_shot_id = ""
 
         self.overlay = SelectionOverlay()
         self.overlay.signal_selected.connect(self._on_region_selected)
+
+        # 启动局域网手机副屏服务端，接收手机端触控指令并建立实时推流管道
+        try:
+            lan_bridge_server.signal_remote_trigger.connect(self._on_remote_mobile_trigger)
+            lan_bridge_server.start_server()
+        except Exception as e:
+            print(f"[MainWindow] 启动手机副屏服务失败: {e}")
 
         self._init_ui()
         self._apply_styles()
@@ -312,6 +323,12 @@ class MainWindow(QMainWindow):
         self.btn_click_through.setToolTip("开启后鼠标直接穿透浮窗点击底层考卷，绝不失焦 (Alt+C)")
         self.btn_click_through.clicked.connect(self.toggle_click_through)
         row2_layout.addWidget(self.btn_click_through)
+
+        self.btn_phone_bridge = QPushButton("📱 手机副屏")
+        self.btn_phone_bridge.setToolTip("查看手机副屏访问地址（同一 Wi-Fi 下手机浏览器直接看答案，防霸屏必备）")
+        self.btn_phone_bridge.setStyleSheet("color: #0284c7; font-weight: bold;")
+        self.btn_phone_bridge.clicked.connect(self._show_phone_bridge_info)
+        row2_layout.addWidget(self.btn_phone_bridge)
 
         self.btn_export = QPushButton("📄 导出")
         self.btn_export.setToolTip("导出全部历史记录到 Word (.docx)")
@@ -485,6 +502,41 @@ class MainWindow(QMainWindow):
                 font-weight: 500;
             }
         """)
+
+    def _show_phone_bridge_info(self):
+        """展示手机副屏访问地址与使用指南，并自动复制主地址到剪贴板"""
+        urls = lan_bridge_server.get_mobile_urls()
+        primary_url = urls[0] if urls else "http://127.0.0.1:8000/?t=1234"
+        try:
+            clipboard = QGuiApplication.clipboard()
+            clipboard.setText(primary_url)
+        except Exception:
+            pass
+
+        urls_text = "\n".join([f"• {u}" for u in urls])
+        self.lbl_status.setText(f"📱 手机副屏主地址已复制到剪贴板: {primary_url}")
+
+        QMessageBox.information(
+            self,
+            "📱 手机隐形副屏已就绪",
+            f"【手机副屏地址（已复制到剪贴板）】：\n\n"
+            f"{urls_text}\n\n"
+            f"----------------------------------------\n"
+            f"💡 【防霸屏使用指南】：\n"
+            f"1. 确保手机与电脑连接同一 Wi-Fi，手机用自带浏览器打开上述网址；\n"
+            f"2. 电脑被考试软件全屏独占霸屏时，可直接按 Alt+H 彻底隐藏电脑浮窗；\n"
+            f"3. 搜图与大模型解题全在电脑端高速完成，最终文字答案毫秒级直达手机屏幕！\n"
+            f"4. 手机上可直接触控点击【行测精细答题】/【全屏速答】触发电脑截屏！"
+        )
+
+    def _on_remote_mobile_trigger(self, mode: str):
+        """响应来自手机端网页按钮的触控解题指令（电脑被全屏霸屏时直接在后台执行）"""
+        mode_str = "行测精细答题 (32B+DeepSeek)" if mode == "fine" else "全屏速答 (8B+DeepSeek)"
+        self.lbl_status.setText(f"📱 收到手机端指令: 执行【{mode_str}】...")
+        if mode == "fine":
+            self.trigger_fine_visual_capture()
+        else:
+            self.trigger_fullscreen_capture()
 
     def _init_window_styles(self):
         """注入底层 Win32 扩展样式：WS_EX_NOACTIVATE，防止点击悬浮窗窃取考场全屏焦点"""
@@ -785,6 +837,15 @@ class MainWindow(QMainWindow):
             )
         else:
             # 场景 B: 纯文本查询 或 单模型直出
+            self._current_shot_id = uuid.uuid4().hex[:10]
+            if images_b64 and images_b64[0]:
+                try:
+                    b64_str = images_b64[0]
+                    raw_bytes = base64.b64decode(b64_str.split(",")[1]) if "," in b64_str else base64.b64decode(b64_str)
+                    lan_bridge_server.push_shot(self._current_shot_id, raw_bytes, mode="fast")
+                except Exception:
+                    pass
+
             self._start_direct_ai_worker(
                 base_url=base_url,
                 api_key=api_key,
@@ -811,6 +872,15 @@ class MainWindow(QMainWindow):
         第 1 步: 视觉大模型 (vision_model) 秒级高精提取图文与数学公式；
         第 2 步: 提取结果自动无缝交由主模型 (main_model) 展开秒杀作答 (答案置顶)。
         """
+        self._current_shot_id = uuid.uuid4().hex[:10]
+        if images_b64 and images_b64[0]:
+            try:
+                b64_str = images_b64[0]
+                raw_bytes = base64.b64decode(b64_str.split(",")[1]) if "," in b64_str else base64.b64decode(b64_str)
+                lan_bridge_server.push_shot(self._current_shot_id, raw_bytes, mode="fast")
+            except Exception as e:
+                print(f"[LANBridge] 推送截图异常: {e}")
+
         if self._current_vision_worker and self._current_vision_worker.isRunning():
             self._current_vision_worker.cancel()
         if self._current_ai_worker and self._current_ai_worker.isRunning():
@@ -859,10 +929,11 @@ class MainWindow(QMainWindow):
 
         def _on_extract_error(err_msg: str):
             self.lbl_status.setText(f"⚠️ 视觉提干失败，自动降级为单模型直出: {err_msg}")
+            fallback_vision = config_manager.get("fine_vision_model_name", "Qwen/Qwen3-VL-32B-Instruct")
             self._start_direct_ai_worker(
                 base_url=base_url,
                 api_key=api_key,
-                model=vision_model or main_model,
+                model=fallback_vision,
                 system_prompt=system_prompt,
                 user_text="请审视题目截图，第一行直接给出【最终答案：选项】，随后给出两句话以内的秒杀逻辑。严禁生成代码，控制在3~4行以内。",
                 images_b64=images_b64,
@@ -887,6 +958,14 @@ class MainWindow(QMainWindow):
         1. 直接全屏超清捕获，调用 32B 深度视觉模型深度剖析微观图形拓扑、对称轴、数量规律及选项差异；
         2. 结构化特征自动交由 DeepSeek 展开逻辑推理与破题（严格遵守精简输出规范，非编程题绝不写代码）。
         """
+        self._current_shot_id = uuid.uuid4().hex[:10]
+        if image_b64:
+            try:
+                raw_bytes = base64.b64decode(image_b64.split(",")[1]) if "," in image_b64 else base64.b64decode(image_b64)
+                lan_bridge_server.push_shot(self._current_shot_id, raw_bytes, mode="fine")
+            except Exception as e:
+                print(f"[LANBridge] 推送截图异常: {e}")
+
         base_url = config_manager.get("api_base_url", "")
         api_key = config_manager.get("api_key", "")
         fine_vision_model = config_manager.get("fine_vision_model_name", "Qwen/Qwen3-VL-32B-Instruct")
@@ -1053,12 +1132,18 @@ class MainWindow(QMainWindow):
         cursor.insertText(chunk)
         # 始终锁定视图置顶，答案首行始终可见，绝不因光标后移发生滚轮下移
         self.browser_answer.verticalScrollBar().setValue(0)
+        # 实时推送到手机副屏
+        if hasattr(self, '_current_shot_id') and self._current_shot_id:
+            lan_bridge_server.push_answer(self._current_shot_id, self._last_answer_text, status="generating")
 
     def _on_ai_finished(self):
         self.progress_bar.setVisible(False)
-        self.lbl_status.setText("✅ 回答完成 | 答案已置顶呈现")
+        self.lbl_status.setText("✅ 回答完成 | 答案已置顶呈现 (手机副屏同步)")
         # 确保视图严格置顶，无需滑动滚轮
         self.browser_answer.verticalScrollBar().setValue(0)
+        # 最终答案推送到手机副屏
+        if hasattr(self, '_current_shot_id') and self._current_shot_id:
+            lan_bridge_server.push_answer(self._current_shot_id, self._last_answer_text, status="ok")
         # 保存至历史记录
         rec_type = "exam" if self._last_pixmaps else "interview"
         history_manager.save_record(
@@ -1073,6 +1158,8 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"❌ 请求失败: {err_msg}")
         self.progress_bar.setVisible(False)
         self.browser_answer.append(f"\n\n<span style='color: #dc2626; font-weight: bold;'>[错误详情] {err_msg}</span>")
+        if hasattr(self, '_current_shot_id') and self._current_shot_id:
+            lan_bridge_server.push_answer(self._current_shot_id, f"❌ 答题失败: {err_msg}", status="error")
 
     def _toggle_interview_listener(self):
         """开启/关闭面试内录监听"""

@@ -304,77 +304,90 @@ class VisionExtractorWorker(QThread):
                 "image_url": {"url": img}
             })
 
-        payload = {
-            "model": self.vision_model,
-            "messages": [{"role": "user", "content": user_content}],
-            "stream": True,
-            "temperature": 0.1,
-            "enable_thinking": False,
-            "max_tokens": 700
-        }
+        # 构建候选视觉模型列表，若主模型超时或异常则自动无感灾备熔断重试
+        candidate_models = [self.vision_model]
+        for fallback in ["Qwen/Qwen3-VL-32B-Instruct", "Qwen/Qwen3-VL-30B-A3B-Instruct", "deepseek-ai/DeepSeek-OCR"]:
+            if fallback not in candidate_models:
+                candidate_models.append(fallback)
 
         url = f"{self.base_url}/chat/completions"
+        last_error = ""
 
-        try:
-            with httpx.Client(timeout=45.0) as client:
-                self._client = client
-                with client.stream("POST", url, headers=headers, json=payload) as resp:
-                    self._active_response = resp
-                    if self._is_cancelled:
-                        return
+        for model_name in candidate_models:
+            if self._is_cancelled:
+                return
 
-                    if resp.status_code != 200:
-                        err_text = resp.read().decode("utf-8", errors="replace")
-                        self.signal_error.emit(f"视觉识别服务返回 HTTP {resp.status_code}: {err_text}")
-                        return
+            payload = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": user_content}],
+                "stream": True,
+                "temperature": 0.1,
+                "max_tokens": 700
+            }
 
-                    extracted_chunks = []
-                    for line in resp.iter_lines():
+            try:
+                with httpx.Client(timeout=18.0) as client:
+                    self._client = client
+                    with client.stream("POST", url, headers=headers, json=payload) as resp:
+                        self._active_response = resp
                         if self._is_cancelled:
-                            try:
-                                resp.close()
-                            except Exception:
-                                pass
-                            break
-                        if not line:
+                            return
+
+                        if resp.status_code != 200:
+                            err_text = resp.read().decode("utf-8", errors="replace")
+                            last_error = f"HTTP {resp.status_code}: {err_text}"
                             continue
-                        line = line.strip()
-                        if line.startswith("data: "):
-                            raw_data = line[6:].strip()
-                            if raw_data == "[DONE]":
+
+                        extracted_chunks = []
+                        for line in resp.iter_lines():
+                            if self._is_cancelled:
                                 try:
                                     resp.close()
                                 except Exception:
                                     pass
                                 break
-                            try:
-                                chunk = json.loads(raw_data)
-                                choices = chunk.get("choices", [])
-                                if not choices:
-                                    continue
-                                delta = choices[0].get("delta", {})
-                                c = delta.get("content", "")
-                                if c:
-                                    extracted_chunks.append(c)
-
-                                finish_reason = choices[0].get("finish_reason")
-                                if finish_reason in ("stop", "length"):
+                            if not line:
+                                continue
+                            line = line.strip()
+                            if line.startswith("data: "):
+                                raw_data = line[6:].strip()
+                                if raw_data == "[DONE]":
                                     try:
                                         resp.close()
                                     except Exception:
                                         pass
                                     break
-                            except json.JSONDecodeError:
-                                continue
+                                try:
+                                    chunk = json.loads(raw_data)
+                                    choices = chunk.get("choices", [])
+                                    if not choices:
+                                        continue
+                                    delta = choices[0].get("delta", {})
+                                    c = delta.get("content", "")
+                                    if c:
+                                        extracted_chunks.append(c)
 
-                    full_extracted = "".join(extracted_chunks).strip()
-                    if not full_extracted and not self._is_cancelled:
-                        self.signal_error.emit("未能从截图中提取到有效视觉文本")
-                        return
+                                    finish_reason = choices[0].get("finish_reason")
+                                    if finish_reason in ("stop", "length"):
+                                        try:
+                                            resp.close()
+                                        except Exception:
+                                            pass
+                                        break
+                                except json.JSONDecodeError:
+                                    continue
 
-                    if not self._is_cancelled:
-                        self.signal_extracted.emit(full_extracted)
+                        full_extracted = "".join(extracted_chunks).strip()
+                        if full_extracted:
+                            if not self._is_cancelled:
+                                self.signal_extracted.emit(full_extracted)
+                            return
+                        else:
+                            last_error = f"模型 {model_name} 未能提取到有效视觉文本"
 
-        except Exception as e:
-            if not self._is_cancelled:
-                self.signal_error.emit(f"视觉识别异常: {str(e)}")
+            except Exception as e:
+                last_error = f"模型 {model_name} 异常: {str(e)}"
+                continue
+
+        if not self._is_cancelled:
+            self.signal_error.emit(f"视觉识别服务所有候选模型均无法访问: {last_error}")
