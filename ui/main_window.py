@@ -28,6 +28,7 @@ from core.history_manager import history_manager
 from core.lan_bridge import lan_bridge_server
 from ui.selection_overlay import SelectionOverlay
 from ui.settings_dialog import SettingsDialog
+from ui.mobile_dialog import MobileSyncDialog
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -504,30 +505,12 @@ class MainWindow(QMainWindow):
         """)
 
     def _show_phone_bridge_info(self):
-        """展示手机副屏访问地址与使用指南，并自动复制主地址到剪贴板"""
-        urls = lan_bridge_server.get_mobile_urls()
-        primary_url = urls[0] if urls else "http://127.0.0.1:8000/?t=1234"
+        """展示手机副屏扫码窗口与使用指南"""
         try:
-            clipboard = QGuiApplication.clipboard()
-            clipboard.setText(primary_url)
-        except Exception:
-            pass
-
-        urls_text = "\n".join([f"• {u}" for u in urls])
-        self.lbl_status.setText(f"📱 手机副屏主地址已复制到剪贴板: {primary_url}")
-
-        QMessageBox.information(
-            self,
-            "📱 手机隐形副屏已就绪",
-            f"【手机副屏地址（已复制到剪贴板）】：\n\n"
-            f"{urls_text}\n\n"
-            f"----------------------------------------\n"
-            f"💡 【防霸屏使用指南】：\n"
-            f"1. 确保手机与电脑连接同一 Wi-Fi，手机用自带浏览器打开上述网址；\n"
-            f"2. 电脑被考试软件全屏独占霸屏时，可直接按 Alt+H 彻底隐藏电脑浮窗；\n"
-            f"3. 搜图与大模型解题全在电脑端高速完成，最终文字答案毫秒级直达手机屏幕！\n"
-            f"4. 手机上可直接触控点击【行测精细答题】/【全屏速答】触发电脑截屏！"
-        )
+            dlg = MobileSyncDialog(self)
+            dlg.exec()
+        except Exception as e:
+            QMessageBox.warning(self, "手机副屏", f"打开扫码窗口异常: {e}")
 
     def _on_remote_mobile_trigger(self, mode: str):
         """响应来自手机端网页按钮的触控解题指令（电脑被全屏霸屏时直接在后台执行）"""

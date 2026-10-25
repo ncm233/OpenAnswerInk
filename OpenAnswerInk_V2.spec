@@ -21,7 +21,11 @@ hiddenimports = [
     'json',
     'uuid',
     'time',
-    'threading'
+    'threading',
+    'qrcode',
+    'PIL',
+    'http.server',
+    'socketserver',
 ]
 
 # 收集音频转写依赖
